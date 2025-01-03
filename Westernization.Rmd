@@ -1,0 +1,865 @@
+---
+title: "Westernization clustering for regression"
+output: html_notebook
+---
+1. Preliminaries
+
+1.1 Relevant libraries
+
+```{r}
+library(dplyr)
+library(ggplot2)    # For plots
+library(tidyr)
+library(ggrepel)    # For geom_text_repel
+library(smacof)     # For MDS and stress plot
+library(cluster)    # For k-means clustering
+library(geometry)   # For convex hull calculations
+library(factoextra) # For plotting WSS for multiple k's
+library(fpc)        # For cluster bootstrapping
+library(flexclust)  # For Random Index Calculation
+library(readr)      
+```
+
+1.2 Data preparation
+
+```{r}
+# Load the CSV data from the specified file path
+file_path <- "C:/Users/USERS/Datasets_Westernization_R_scripts_regression/country_wave_level_means.csv"
+df1 <- read.csv(file_path, stringsAsFactors = FALSE)
+df1 <- df1 %>% filter(Country_Wave != "HTI6") # remove Haiti because it is an outlier
+# Define groups of questions
+question_groups <- list(
+  c("A001", "A002", "A003", "A004", "A005", "A006"),
+  c("D057", "D059", "D060"),
+  c("F115", "F116", "F117", "F118", "F119", "F120", "F121", "F122", "F123"),
+  c("E114", "E115", "E116", "E117"),
+  c("E012", "E015", "E016", "E018", "E023", "E025", "E026", "E027"), 
+  c("E033", "E035", "E036", "E037", "E039") 
+)
+
+# Replace NA values with the mean for each question
+for (question in unlist(question_groups)) {
+  df1[[question]][is.na(df1[[question]])] <- mean(df1[[question]], na.rm = TRUE)
+}
+
+# Filter the dataframe to include only the relevant columns for each question group
+filtered_dfs <- list()
+for (questions in question_groups) {
+  temp_df <- df1[, c(questions, 'Country_Wave')]
+  filtered_dfs <- append(filtered_dfs, list(temp_df))
+}
+```
+
+2. Distance matrix
+
+Mahalanobis
+
+```{r}
+distance_matrices <- lapply(filtered_dfs, function(df) {
+  data <- scale(df[, !names(df) %in% "Country_Wave"], center=TRUE, scale=TRUE)
+  data_matrix <- as.matrix(data)
+  # Compute covariance matrix of the data
+  S <- cov(data_matrix)  # Covariance matrix is square
+  
+  # Eigendecomposition of the covariance matrix
+  eig <- eigen(S)  # Perform eigen decomposition on the covariance matrix
+  V <- eig$vectors      # Eigenvectors
+  lambda <- eig$values  # Eigenvalues
+  
+  # Compute S^(-1/2)
+  Sinvsqrt <- V %*% diag(1 / sqrt(lambda)) %*% t(V)
+  
+  # Project the data into the Mahalanobis space
+  Xinvsqrt <- data_matrix %*% Sinvsqrt  
+  
+  # Compute pairwise Mahalanobis distances
+  d_mahalanobis <- as.dist(dist(Xinvsqrt))
+  # Return the distance matrix for the group
+  return(d_mahalanobis)
+})
+
+dmahalanobis <- Reduce(function(x, y) {
+  # Convert 'dist' objects to full matrices, sum them, and convert back to 'dist'
+  return(as.dist(as.matrix(x) + as.matrix(y)))
+}, distance_matrices)
+
+# Print the dimension of the summed distance matrix
+#print(dim(as.matrix(dmahalanobis))) 
+print(dim(as.matrix(dmahalanobis))) 
+
+```
+Euclidean
+
+```{r}
+
+distance_matrices2 <- lapply(filtered_dfs, function(df) {
+  data <- scale(df[, !names(df) %in% "Country_Wave"], center=TRUE, scale=TRUE)
+  d_manhattan <- dist(data, method = "euclidean")
+})
+
+# Sum all distance matrices element-wise
+deuclidean <- Reduce("+", distance_matrices2)
+```
+Manhattan
+
+```{r}
+distance_matrices3 <- lapply(filtered_dfs, function(df) {
+  data <- scale(df[, !names(df) %in% "Country_Wave"], center=TRUE, scale=TRUE)
+  d_manhattan <- dist(data, method = "manhattan")
+})
+
+# Sum all distance matrices element-wise
+dmanhattan <- Reduce("+", distance_matrices3)
+```
+
+3. Choosing the k number of dimensions
+
+3.1 Stress values for each distance
+
+```{r}
+library(vegan)
+# MANHATTAN
+vmanhattan <- as.vector(dmanhattan)
+mds_k4man <- cmdscale(dmanhattan, k=2, eig = TRUE)
+reduced_dist <- dist(mds_k4man$points[,1:2])
+vredDist <- as.vector(reduced_dist)
+ 
+stress_manhattan <- sqrt(sum((vmanhattan - vredDist)^2) / sum(vmanhattan^2))
+plot(vmanhattan, vredDist, pch = 20, xlab = "Original Distances", ylab = "Reduced Distances",
+     main = "Stress Plot for Classical MDS")
+
+# Add a line showing the ideal 1:1 correspondence
+abline(0, 1, col = "red", lwd = 2)
+
+# With NMDS
+nmds_meta <- metaMDS(dmanhattan, k = 2, trymax = 100)  # k = 2 or k = 4.
+reduced_dist_meta <- dist(nmds_meta$points)  
+vredDist_meta <- as.vector(reduced_dist_meta)
+stress_meta <- sqrt(sum((vmanhattan - vredDist_meta)^2) / sum(vmanhattan^2))
+stressplot(nmds_meta, pch = 20)
+
+# MAHALANOBIS
+vmahalanobis <- as.vector(dmahalanobis)
+mds_k4mah <- cmdscale(dmahalanobis, k=2, eig = TRUE)
+reduced_dist2 <- dist(mds_k4mah$points[,1:2])
+vredDist2 <- as.vector(reduced_dist2)
+
+stress_mahalanobis <- sqrt(sum((vmahalanobis - vredDist2)^2) / sum(vmahalanobis^2))
+
+# With NMDS
+nmds_mahalanobis <- metaMDS(dmahalanobis, k = 2, trymax = 100)
+reduced_dist_mahalanobis_meta <- dist(nmds_mahalanobis$points)
+vredDist_mahalanobis_meta <- as.vector(reduced_dist_mahalanobis_meta)
+
+stress_mahalanobis_meta <- sqrt(sum((vmahalanobis - vredDist_mahalanobis_meta)^2) / sum(vmahalanobis^2))
+
+# EUCLIDEAN
+veuclidean <- as.vector(deuclidean)
+
+mds_k4e <- cmdscale(deuclidean, k=2, eig = TRUE)
+reduced_dist3 <- dist(mds_k4e$points[,1:2])
+vredDist3 <- as.vector(reduced_dist3)
+
+stress_euclidean <- sqrt(sum((veuclidean - vredDist3)^2) / sum(veuclidean^2))
+
+# With NMDS
+nmds_euclidean <- metaMDS(deuclidean, k = 2, trymax = 100)
+reduced_dist_euclidean_meta <- dist(nmds_euclidean$points)
+vredDist_euclidean_meta <- as.vector(reduced_dist_euclidean_meta)
+
+stress_euclidean_meta <- sqrt(sum((veuclidean - vredDist_euclidean_meta)^2) / sum(veuclidean^2))
+stress_euclidean_meta
+
+# PRINTING OUTPUT
+# Classical MDS
+print(paste0("Classical MDS Manhattan stress:", stress_manhattan))       # Manhattan
+print(paste0("Classical MDS Mahalanobis stress:", stress_mahalanobis))     # Mahalanobis
+print(paste0("Classical MDS Euclidean stress:", stress_euclidean))       # Euclidean
+print(" ")
+
+# NMDS (with metric MDS stress)
+# Print Results
+print(paste("NMDS Manhattan Stress:", stress_meta))
+print(paste("NMDS Mahalanobis Stress:", stress_mahalanobis_meta))
+print(paste("NMDS Euclidean Stress:", stress_euclidean_meta))
+print(" ")
+
+# NMDS Kruskal's Stress
+stress_meta2 <- nmds_meta$stress  # NMDS stress value for Manhattan
+stress_mahalanobis_meta2 <- nmds_mahalanobis$stress # NMDS stress value for Mahalanobis
+stress_euclidean_meta2 <- nmds_euclidean$stress  # NMDS stress value for Euclidean
+
+print(paste("Kruskal NMDS Manhattan Stress:", stress_meta2))
+print(paste("Kruskal NMDS Mahalanobis Stress:", stress_mahalanobis_meta2))
+print(paste("Kruskal NMDS Euclidean Stress:", stress_euclidean_meta2))
+
+```
+
+3.2.1 Stress values scree plot (Classical MDS, Manhattan)
+
+```{r}
+# Function to calculate stress values using Classical MDS (cmdscale)
+calculate_stress <- function(distance_matrix, max_dimensions) {
+  sapply(1:max_dimensions, function(dim) {
+    # Perform Classical MDS
+    mds_fit <- cmdscale(distance_matrix, k = dim, eig = TRUE)
+    
+    # Reconstruct distances in reduced dimensions
+    reduced_dist <- dist(mds_fit$points)
+    
+    # Compute stress value
+    original_dist <- as.vector(distance_matrix)
+    reduced_dist <- as.vector(reduced_dist)
+    stress <- sqrt(sum((original_dist - reduced_dist)^2) / sum(original_dist^2))
+    
+    return(stress)
+  })
+}
+
+distance_matrix <- dmanhattan  # Replace with your own distance matrix
+max_dimensions <- 20  # Number of dimensions to evaluate
+
+# Compute stress values
+stress_values <- calculate_stress(distance_matrix, max_dimensions)
+
+# Create a data frame for plotting
+stress_df <- data.frame(
+  Dimensions = 1:max_dimensions,
+  Stress = stress_values
+)
+
+# Plot the scree plot
+stress_plot <- ggplot(stress_df, aes(x = Dimensions, y = Stress)) +
+  geom_line(color = "blue") +
+  geom_point(size = 3) +
+  theme_minimal() +
+  xlab("Number of Dimensions") +
+  ylab("Stress Value") +
+  ggtitle("Stress vs. Number of Dimensions (Classical MDS - Formula)")
+
+# Save and display the plot
+ggsave(
+  filename = "C:/Users/USERS/stress_plot2.jpg",
+  plot = stress_plot,
+  width = 8, height = 6,
+  dpi = 300
+)
+
+print(stress_plot)
+
+
+```
+
+```{r}
+---
+title: "Westernization clustering for regression"
+output: html_notebook
+---
+1. Preliminaries
+
+1.1 Relevant libraries
+
+```{r}
+library(dplyr)
+library(ggplot2)    # For plots
+library(tidyr)
+library(ggrepel)    # For geom_text_repel
+library(smacof)     # For MDS and stress plot
+library(cluster)    # For k-means clustering
+library(geometry)   # For convex hull calculations
+library(factoextra) # For plotting WSS for multiple k's
+library(fpc)        # For cluster bootstrapping
+library(flexclust)  # For Random Index Calculation
+library(readr)      
+```
+
+1.2 Data preparation
+
+```{r}
+# Load the CSV data from the specified file path
+file_path <- "C:/Users/noure/Downloads/ECO/MDA/MDA_PROJECT/Datasets_Westernization_R_scripts_regression/country_wave_level_means.csv"
+df1 <- read.csv(file_path, stringsAsFactors = FALSE)
+df1 <- df1 %>% filter(Country_Wave != "HTI6") # remove Haiti because it is an outlier
+# Define groups of questions
+question_groups <- list(
+  c("A001", "A002", "A003", "A004", "A005", "A006"),
+  c("D057", "D059", "D060"),
+  c("F115", "F116", "F117", "F118", "F119", "F120", "F121", "F122", "F123"),
+  c("E114", "E115", "E116", "E117"),
+  c("E012", "E015", "E016", "E018", "E023", "E025", "E026", "E027"), 
+  c("E033", "E035", "E036", "E037", "E039") 
+)
+
+# Replace NA values with the mean for each question
+for (question in unlist(question_groups)) {
+  df1[[question]][is.na(df1[[question]])] <- mean(df1[[question]], na.rm = TRUE)
+}
+
+# Filter the dataframe to include only the relevant columns for each question group
+filtered_dfs <- list()
+for (questions in question_groups) {
+  temp_df <- df1[, c(questions, 'Country_Wave')]
+  filtered_dfs <- append(filtered_dfs, list(temp_df))
+}
+```
+
+2. Distance matrix
+
+Mahalanobis
+
+```{r}
+distance_matrices <- lapply(filtered_dfs, function(df) {
+  data <- scale(df[, !names(df) %in% "Country_Wave"], center=TRUE, scale=TRUE)
+  data_matrix <- as.matrix(data)
+  # Compute covariance matrix of the data
+  S <- cov(data_matrix)  # Covariance matrix is square
+  
+  # Eigendecomposition of the covariance matrix
+  eig <- eigen(S)  # Perform eigen decomposition on the covariance matrix
+  V <- eig$vectors      # Eigenvectors
+  lambda <- eig$values  # Eigenvalues
+  
+  # Compute S^(-1/2)
+  Sinvsqrt <- V %*% diag(1 / sqrt(lambda)) %*% t(V)
+  
+  # Project the data into the Mahalanobis space
+  Xinvsqrt <- data_matrix %*% Sinvsqrt  
+  
+  # Compute pairwise Mahalanobis distances
+  d_mahalanobis <- as.dist(dist(Xinvsqrt))
+  # Return the distance matrix for the group
+  return(d_mahalanobis)
+})
+
+dmahalanobis <- Reduce(function(x, y) {
+  # Convert 'dist' objects to full matrices, sum them, and convert back to 'dist'
+  return(as.dist(as.matrix(x) + as.matrix(y)))
+}, distance_matrices)
+
+# Print the dimension of the summed distance matrix
+#print(dim(as.matrix(dmahalanobis))) 
+print(dim(as.matrix(dmahalanobis))) 
+
+```
+Euclidean
+
+```{r}
+
+distance_matrices2 <- lapply(filtered_dfs, function(df) {
+  data <- scale(df[, !names(df) %in% "Country_Wave"], center=TRUE, scale=TRUE)
+  d_manhattan <- dist(data, method = "euclidean")
+})
+
+# Sum all distance matrices element-wise
+deuclidean <- Reduce("+", distance_matrices2)
+```
+Manhattan
+
+```{r}
+distance_matrices3 <- lapply(filtered_dfs, function(df) {
+  data <- scale(df[, !names(df) %in% "Country_Wave"], center=TRUE, scale=TRUE)
+  d_manhattan <- dist(data, method = "manhattan")
+})
+
+# Sum all distance matrices element-wise
+dmanhattan <- Reduce("+", distance_matrices3)
+```
+
+3. Choosing the k number of dimensions
+
+3.1 Stress values for each distance
+
+```{r}
+library(vegan)
+# MANHATTAN
+vmanhattan <- as.vector(dmanhattan)
+mds_k4man <- cmdscale(dmanhattan, k=2, eig = TRUE)
+reduced_dist <- dist(mds_k4man$points[,1:2])
+vredDist <- as.vector(reduced_dist)
+ 
+stress_manhattan <- sqrt(sum((vmanhattan - vredDist)^2) / sum(vmanhattan^2))
+plot(vmanhattan, vredDist, pch = 20, xlab = "Original Distances", ylab = "Reduced Distances",
+     main = "Stress Plot for Classical MDS")
+# Add a line showing the ideal 1:1 correspondence
+abline(0, 1, col = "red", lwd = 2)
+
+# With NMDS
+nmds_meta <- metaMDS(dmanhattan, k = 2, trymax = 100)  # k = 2 
+reduced_dist_meta <- dist(nmds_meta$points)  
+vredDist_meta <- as.vector(reduced_dist_meta)
+stress_meta <- sqrt(sum((vmanhattan - vredDist_meta)^2) / sum(vmanhattan^2))
+stressplot(nmds_meta, pch = 20, main = "Stress Plot for NMDS - Manhattan Distance")
+
+# MAHALANOBIS
+vmahalanobis <- as.vector(dmahalanobis)
+mds_k4mah <- cmdscale(dmahalanobis, k=2, eig = TRUE)
+reduced_dist2 <- dist(mds_k4mah$points[,1:2])
+vredDist2 <- as.vector(reduced_dist2)
+
+stress_mahalanobis <- sqrt(sum((vmahalanobis - vredDist2)^2) / sum(vmahalanobis^2))
+
+# With NMDS
+nmds_mahalanobis <- metaMDS(dmahalanobis, k = 2, trymax = 100)
+reduced_dist_mahalanobis_meta <- dist(nmds_mahalanobis$points)
+vredDist_mahalanobis_meta <- as.vector(reduced_dist_mahalanobis_meta)
+
+stress_mahalanobis_meta <- sqrt(sum((vmahalanobis - vredDist_mahalanobis_meta)^2) / sum(vmahalanobis^2))
+
+# EUCLIDEAN
+veuclidean <- as.vector(deuclidean)
+
+mds_k4e <- cmdscale(deuclidean, k=2, eig = TRUE)
+reduced_dist3 <- dist(mds_k4e$points[,1:2])
+vredDist3 <- as.vector(reduced_dist3)
+stress_euclidean <- sqrt(sum((veuclidean - vredDist3)^2) / sum(veuclidean^2))
+
+# With NMDS
+nmds_euclidean <- metaMDS(deuclidean, k = 2, trymax = 100)
+reduced_dist_euclidean_meta <- dist(nmds_euclidean$points)
+vredDist_euclidean_meta <- as.vector(reduced_dist_euclidean_meta)
+
+stress_euclidean_meta <- sqrt(sum((veuclidean - vredDist_euclidean_meta)^2) / sum(veuclidean^2))
+stress_euclidean_meta
+
+# PRINTING OUTPUT
+# Classical MDS
+print(paste0("Classical MDS Manhattan stress:", stress_manhattan))       # Manhattan
+print(paste0("Classical MDS Mahalanobis stress:", stress_mahalanobis))     # Mahalanobis
+print(paste0("Classical MDS Euclidean stress:", stress_euclidean))       # Euclidean
+print(" ")
+
+# NMDS (with metric MDS stress)
+# Print Results
+print(paste("NMDS Manhattan Stress:", stress_meta))
+print(paste("NMDS Mahalanobis Stress:", stress_mahalanobis_meta))
+print(paste("NMDS Euclidean Stress:", stress_euclidean_meta))
+print(" ")
+
+# NMDS Kruskal's Stress
+stress_meta2 <- nmds_meta$stress  # NMDS stress value for Manhattan
+stress_mahalanobis_meta2 <- nmds_mahalanobis$stress # NMDS stress value for Mahalanobis
+stress_euclidean_meta2 <- nmds_euclidean$stress  # NMDS stress value for Euclidean
+
+print(paste("Kruskal NMDS Manhattan Stress:", stress_meta2))
+print(paste("Kruskal NMDS Mahalanobis Stress:", stress_mahalanobis_meta2))
+print(paste("Kruskal NMDS Euclidean Stress:", stress_euclidean_meta2))
+
+```
+
+3.2.1 Stress values scree plot (classical, Manhattan)
+
+```{r}
+# Function to calculate stress values using Classical MDS (cmdscale)
+calculate_stress <- function(distance_matrix, max_dimensions) {
+  sapply(1:max_dimensions, function(dim) {
+    # Perform Classical MDS
+    mds_fit <- cmdscale(distance_matrix, k = dim, eig = TRUE)
+    
+    # Reconstruct distances in reduced dimensions
+    reduced_dist <- dist(mds_fit$points)
+    
+    # Compute stress value
+    original_dist <- as.vector(distance_matrix)
+    reduced_dist <- as.vector(reduced_dist)
+    stress <- sqrt(sum((original_dist - reduced_dist)^2) / sum(original_dist^2))
+    
+    return(stress)
+  })
+}
+
+distance_matrix <- dmanhattan  # Replace with your own distance matrix
+max_dimensions <- 20  # Number of dimensions to evaluate
+
+# Compute stress values
+stress_values <- calculate_stress(distance_matrix, max_dimensions)
+
+# Create a data frame for plotting
+stress_df <- data.frame(
+  Dimensions = 1:max_dimensions,
+  Stress = stress_values
+)
+
+# Plot the scree plot
+stress_plot <- ggplot(stress_df, aes(x = Dimensions, y = Stress)) +
+  geom_line(color = "blue") +
+  geom_point(size = 3) +
+  theme_minimal() +
+  xlab("Number of Dimensions") +
+  ylab("Stress Value") +
+  ggtitle("Stress vs. Number of Dimensions (Classical MDS - Formula)")
+
+# Save and display the plot
+ggsave(
+  filename = "C:/Users/noure/Downloads/ECO/MDA/stress_plot2.jpg",
+  plot = stress_plot,
+  width = 8, height = 6,
+  dpi = 300
+)
+
+print(stress_plot)
+
+
+```
+
+3.2.1 Stress values scree plot (NMDS, Manhattan)
+
+
+```{r}
+# Function to compute NMDS stress values for Manhattan distances
+calculate_nmds_stress <- function(distance_matrix, max_dimensions, trymax = 10) { # only 10 due to computational limitations
+  stress_values <- sapply(1:max_dimensions, function(k) {
+    nmds_result <- metaMDS(distance_matrix, k = k, trymax = trymax, trace = FALSE)
+    return(nmds_result$stress)  # Return Kruskal's stress value
+  })
+  return(stress_values)
+}
+
+# Compute NMDS stress values for Manhattan distance
+max_dimensions <- 10  # Number of dimensions to test
+nmds_stress_values <- calculate_nmds_stress(dmanhattan, max_dimensions)
+
+# Create a data frame for stress plot
+stress_df <- data.frame(
+  Dimensions = 1:max_dimensions,
+  Stress = nmds_stress_values
+)
+
+# Plot the NMDS stress scree plot
+stress_scree_plot <- ggplot(stress_df, aes(x = Dimensions, y = Stress)) +
+  geom_line(color = "blue", size = 1) +
+  geom_point(color = "red", size = 2) +
+  theme_minimal() +
+  labs(
+    title = "NMDS Stress Plot for Manhattan Distance",
+    x = "Number of Dimensions (k)",
+    y = "Kruskal's Stress Value"
+  )
+
+# Save and display the stress plot
+ggsave(
+  filename = "C:/Users/USERS/nmds_manhattan_stress_plot.jpg",
+  plot = stress_scree_plot,
+  width = 8, height = 6, dpi = 300
+)
+
+# Print the plot
+print(stress_scree_plot)
+```
+
+
+3.3 Multidimensional Scaling
+
+```{r}
+# Convert the combined distance matrix to an 'as.dist' object
+#distance <- as.dist(dmanhattan)
+
+# Perform Classical MDS with 4 dimensions (k = 4)
+mds_fit <- metaMDS(dmanhattan, k = 2, trymax = 100)
+
+# Extract the coordinates from the MDS result (first 4 dimensions)
+mds_coords <- as.data.frame(mds_fit$points)
+colnames(mds_coords) <- c("Dim1",  "Dim2")
+
+# Create a data frame for plotting
+mds_data <- mds_coords  # Using the result from 'mds_fit'
+mds_data$Country_Wave <- df1$Country_Wave  # Add 'Country_Wave' information for labeling
+
+# Plot the MDS result using ggplot2
+library(ggplot2)
+mds_plot <- ggplot(mds_data, aes(x = Dim1, y = Dim2, label = Country_Wave)) +
+  geom_point(size = 1, color = "blue") +  # Plot points in blue
+  geom_text_repel(size = 3) +  # Add labels with automatic text repelling
+  theme_minimal() +  # Minimal theme for clean plot
+  ggtitle("MDS Plot of Combined Country-Wave Level Means")  # Add a title
+
+# Print the plot
+print(mds_plot)
+# Export the plot as a PNG file
+ggsave(
+  filename = "C:/Users/USERS/mds_plot2.jpg",      # Specify the filename
+  plot = mds_plot,               # Provide the plot object
+  width = 8, height = 6,         # Set the dimensions (in inches)
+  dpi = 300                      # Set the resolution (300 dpi is standard for print)
+)
+```
+
+
+4. Clustering
+
+4.1 Choosing k (minimizing WSS)
+
+```{r}
+
+library(factoextra)
+
+# WSS Method (Elbow Method)
+wss_plot <- fviz_nbclust(mds_coords, kmeans, method = "wss", k.max = 15) +
+  labs(title = "Elbow Method for Optimal Clusters", x = "Number of Clusters (k)", y = "Total WSS")
+wss_plot
+
+# CH Index (Calinski-Harabasz Index)
+ch_plot <- fviz_nbclust(mds_coords, kmeans, method = "silhouette", k.max = 15) +
+  labs(title = "Calinski-Harabasz Index", x = "Number of Clusters (k)", y = "CH Index")
+ch_plot 
+
+```
+
+
+4.2. K-means
+
+```{r}
+# Apply k-means clustering with 3 clusters
+set.seed(42)
+kmeans_fit <- kmeans(mds_coords[1:2], centers = 3)
+mds_coords$Cluster <- as.factor(kmeans_fit$cluster)
+mds_coords$Country_Wave <- df1$Country_Wave
+
+# Plot MDS in 2D (using the first two dimensions), color-coded by cluster
+ggplot(mds_coords, aes(x = Dim1, y = Dim2, color = Cluster)) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = Country_Wave), size = 3) +
+  labs(title = "2D MDS Plot with Clusters", x = "MDS Dimension 1", y = "MDS Dimension 2") +
+  theme_minimal()
+
+# Save the second plot as a JPG file
+ggsave(
+  filename = "mds_plot_clusters.jpg",  # Specify the filename with .jpg extension
+  plot = last_plot(),                 # Use last_plot() if you didn't save the plot object
+  width = 8, height = 6,              # Set the dimensions (in inches)
+  dpi = 300                           # Set the resolution (300 dpi for high quality)
+)
+```
+
+4.3. Testing stability
+
+4.3.1 Bootstrapping
+
+```{r}
+data <- mds_coords[,1:2]
+set.seed(42)                  # Set the same seed as before
+boot_result <- clusterboot(
+  data,
+  B=1000,                      # Number of bootstrap samples
+  clustermethod = kmeansCBI,  # The clustering method used is k-means
+  k = 3                       # Number of clusters
+)
+
+print(boot_result$bootmean)  # Stability scores for each cluster
+
+# Visualize the mean
+barplot(
+  boot_result$bootmean,
+  names.arg = 1:length(boot_result$bootmean),
+  col = "skyblue",
+  xlab = "Cluster",
+  ylab = "Stability Score",
+  main = "Cluster Stability Scores"
+)
+
+```
+
+4.3.2. Multiple Runs and Rand Index
+
+```{r}
+
+# We compare if the first clustering assignation using seed(42) is similar to 
+# the clusteing assignation if we use a different seed (i.e. to check if regardless
+# of the random initial assignation of centroids, clusters are stable, in general)
+# The measure used is the Adjusted Rand Index
+
+n_runs <- 50  
+n_clusters <- 3
+data <- mds_coords[,1:2]
+
+# Store cluster assignments for each run
+cluster_assignments <- matrix(NA, nrow = nrow(data), ncol = n_runs)
+
+for (i in 1:n_runs) {
+  if (i == 1) {
+    set.seed(42)  # Fixed seed for the first run
+  } else {
+    set.seed(42 + 38 * i)  # Different seed for subsequent runs
+  }
+  kmeans_result <- kmeans(data, centers = n_clusters)
+  cluster_assignments[, i] <- kmeans_result$cluster
+}
+
+ari_scores <- numeric(n_runs - 1) # vector that will store ARI scores for each run
+
+for (i in 2:n_runs) {
+  ari_scores[i - 1] <- randIndex(cluster_assignments[, 1], cluster_assignments[, i])
+}
+
+ari_scores
+```
+```{r}
+assignation <- boot_result$result$partition  # Final cluster assignments
+print(assignation)
+
+set.seed(42)
+kmeans_result <- kmeans(data, centers = n_clusters)
+random_st <- kmeans_result$cluster
+print(random_st)
+
+randIndex(assignation, random_st)
+
+```
+
+
+4.4. Westernization
+
+```{r}
+# Identify Cluster 1 as the Western Cluster
+western_cluster <- mds_coords %>% filter(Cluster == 1)
+
+# Calculate Convex Hull for Cluster 1
+hull_indices <- chull(western_cluster$Dim1, western_cluster$Dim2)
+hull_points <- western_cluster[hull_indices, ]
+point_to_segment_distance <- function(point, segment_start, segment_end) {
+  # Ensure all inputs are numeric and properly named
+  px <- as.numeric(point["Dim1"])
+  py <- as.numeric(point["Dim2"])
+  sx <- as.numeric(segment_start["Dim1"])
+  sy <- as.numeric(segment_start["Dim2"])
+  ex <- as.numeric(segment_end["Dim1"])
+  ey <- as.numeric(segment_end["Dim2"])
+
+  # Vector math to calculate the projection of the point onto the segment
+  segment_vector <- c(ex - sx, ey - sy)
+  point_vector <- c(px - sx, py - sy)
+  segment_length_squared <- sum(segment_vector^2)
+  
+  # Handle the case where the segment is effectively a point
+  if (segment_length_squared == 0) {
+    return(sqrt(sum(point_vector^2)))
+  }
+  
+  # Projection factor t
+  t <- max(0, min(1, sum(point_vector * segment_vector) / segment_length_squared))
+  projection <- c(sx, sy) + t * segment_vector
+  
+  # Distance from the point to the projection
+  sqrt(sum((c(px, py) - projection)^2))
+}
+
+calc_distance_to_hull <- function(point, hull_points) {
+  if (point["Cluster"] == 1) {
+    return(0)
+  } else {
+    # Create pairs of consecutive vertices (edges)
+    edges <- rbind(hull_points, hull_points[1, ])  # Close the polygon
+    distances <- sapply(1:(nrow(edges) - 1), function(i) {
+      point_to_segment_distance(
+        point = point,
+        segment_start = edges[i, ],
+        segment_end = edges[i + 1, ]
+      )
+    })
+    return(min(distances))
+  }
+}
+
+# Calculate distance of each observation to the convex hull of Cluster 1
+mds_coords$Distance_to_Cluster_1 <- apply(mds_coords, 1, function(row) {
+  calc_distance_to_hull(as.list(row), hull_points)
+})
+
+
+
+# Extract country code from Country_Wave
+mds_coords <- mds_coords %>%
+  mutate(Country = substr(Country_Wave, 1, 3),
+         Wave = as.numeric(substr(Country_Wave, 4, nchar(Country_Wave))))
+
+# Calculate the difference in distance to western cluster between earliest and latest wave for each country
+distance_diff <- mds_coords %>%
+  group_by(Country) %>%
+  summarize(
+    Earliest_Wave = min(Wave),
+    Latest_Wave = max(Wave),
+    Distance_Earliest = Distance_to_Cluster_1[Wave == Earliest_Wave],
+    Distance_Latest = Distance_to_Cluster_1[Wave == Latest_Wave],
+    Distance_Difference = Distance_Latest - Distance_Earliest
+  ) %>%
+  arrange(Distance_Difference)
+
+# Print the difference in distance for each country
+print(distance_diff)
+
+# Plot the top 10 countries that westernized the most
+top_10 <- distance_diff %>% head(5)
+ggplot(top_10, aes(x = reorder(Country, -Distance_Difference), y = Distance_Difference)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Top 5 Countries that Westernized the Most", x = "Country", y = "Distance Difference") +
+  theme_minimal()
+
+
+# Save the second plot as a JPG file
+ggsave(
+  filename = "gr4.jpg",  # Specify the filename with .jpg extension
+  plot = last_plot(),                 # Use last_plot() if you didn't save the plot object
+  width = 8, height = 6,              # Set the dimensions (in inches)
+  dpi = 300                           # Set the resolution (300 dpi for high quality)
+)
+
+# Plot the top 10 countries in MDS and connect observations from earliest to latest wave
+top_10_countries <- top_10$Country
+mds_top_10 <- mds_coords %>% filter(Country %in% top_10_countries)
+
+# Plot MDS for top 10 countries and draw lines connecting observations from earliest to latest wave, including convex hull
+ggplot(mds_top_10, aes(x = Dim1, y = Dim2, color = Country)) +
+  geom_point(size = 3) +
+  geom_path(aes(group = Country), arrow = arrow(type = "closed", length = unit(0.15, "inches")), size = 0.5) +
+  geom_polygon(data = hull_points, aes(x = Dim1, y = Dim2), fill = NA, color = "black", linetype = "dashed") +
+  geom_text_repel(aes(label = Country_Wave), size = 3) +
+  labs(title = "Movement of Top 5 Countries Across Waves in MDS", x = "MDS Dimension 1", y = "MDS Dimension 2") +
+  theme_minimal()
+
+
+# Save the second plot as a JPG file
+ggsave(
+  filename = "gr1.jpg",  # Specify the filename with .jpg extension
+  plot = last_plot(),                 # Use last_plot() if you didn't save the plot object
+  width = 8, height = 6,              # Set the dimensions (in inches)
+  dpi = 300                           # Set the resolution (300 dpi for high quality)
+)
+
+# Plot the top 10 countries that anti-westernized the most
+bottom_10 <- distance_diff %>% tail(5)
+ggplot(bottom_10, aes(x = reorder(Country, Distance_Difference), y = Distance_Difference)) +
+  geom_bar(stat = "identity", fill = "red") +
+  coord_flip() +
+  labs(title = "Top 5 Countries that Anti-Westernized the Most", x = "Country", y = "Distance Difference") +
+  theme_minimal()
+
+# Save the second plot as a JPG file
+ggsave(
+  filename = "gr2.jpg",  # Specify the filename with .jpg extension
+  plot = last_plot(),                 # Use last_plot() if you didn't save the plot object
+  width = 8, height = 6,              # Set the dimensions (in inches)
+  dpi = 300                           # Set the resolution (300 dpi for high quality)
+)
+
+# Plot the top 10 anti-westernizers in MDS and connect observations from earliest to latest wave, including convex hull
+bottom_10_countries <- bottom_10$Country
+mds_bottom_10 <- mds_coords %>% filter(Country %in% bottom_10_countries)
+
+ggplot(mds_bottom_10, aes(x = Dim1, y = Dim2, color = Country)) +
+  geom_point(size = 3) +
+  geom_path(aes(group = Country), arrow = arrow(type = "closed", length = unit(0.15, "inches")), size = 0.5) +
+  geom_polygon(data = hull_points, aes(x = Dim1, y = Dim2), fill = NA, color = "black", linetype = "dashed") +
+  geom_text_repel(aes(label = Country_Wave), size = 3) +
+  labs(title = "Movement of Top 5 Anti-Westernizing Countries Across Waves in MDS", x = "MDS Dimension 1", y = "MDS Dimension 2") +
+  theme_minimal()
+
+
+# Save the second plot as a JPG file
+ggsave(
+  filename = "gr3.jpg",               # Specify the filename with .jpg extension
+  plot = last_plot(),                 # Use last_plot() if you didn't save the plot object
+  width = 8, height = 6,              # Set the dimensions (in inches)
+  dpi = 300                           # Set the resolution (300 dpi for high quality)
+)
+
+```
